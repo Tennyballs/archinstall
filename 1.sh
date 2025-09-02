@@ -10,6 +10,8 @@ mib_to_gib() {
     echo $(( $1 / 1024 ))
 }
 
+set -e
+
 if [[ $EUID -ne 0 ]]; then
     echo "Please run as root."
     exit 1
@@ -46,6 +48,8 @@ while true; do
             echo "Not confirmed. Please select another drive."
             continue
         fi
+        # Wipe existing partitions table
+        wipefs -a "$DRIVE"
     fi
 
     echo "Proceeding with drive $DRIVE..."
@@ -92,33 +96,22 @@ fi
 
 echo ""
 echo "Partition plan for $DRIVE:"
-echo "  Boot:  1024 MiB (EFI System Partition, type ef00)"
-echo "  Swap:  ${SWAP_MIB} MiB ($SWAP_GIB GiB, type 8200)"
-echo "  Root:  ${ROOT_MIB} MiB ($ROOT_GIB GiB, type 8300)"
-echo "  Home:  ${HOME_MIB} MiB (~${HOME_GIB} GiB, type 8300)"
+echo "  1: Boot (EFI):  1024 MiB (ef00)"
+echo "  2: Swap:        ${SWAP_MIB} MiB ($SWAP_GIB GiB, 8200)"
+echo "  3: Root:        ${ROOT_MIB} MiB ($ROOT_GIB GiB, 8300)"
+echo "  4: Home:        ${HOME_MIB} MiB (~${HOME_GIB} GiB, 8300)"
 
-read -p "Proceed with partitioning? Type 'yes' to confirm: " FINAL_CONFIRM
+read -p "Proceed with partitioning and formatting? Type 'yes' to confirm: " FINAL_CONFIRM
 if [ "$FINAL_CONFIRM" != "yes" ]; then
     echo "Partitioning cancelled."
     exit 1
 fi
 
-# Partition start/end calculations
-PART_BOOT_START=2048         # Start after 1MiB (usually sector 2048)
-PART_BOOT_END=$((PART_BOOT_START + BOOT_MIB * 2048 / 1024 - 1))
+echo "Partitioning drive with gdisk..."
 
-PART_SWAP_START=$((PART_BOOT_END + 1))
-PART_SWAP_END=$((PART_SWAP_START + SWAP_MIB * 2048 / 1024 - 1))
-
-PART_ROOT_START=$((PART_SWAP_END + 1))
-PART_ROOT_END=$((PART_ROOT_START + ROOT_MIB * 2048 / 1024 - 1))
-
-PART_HOME_START=$((PART_ROOT_END + 1))
-PART_HOME_END=                # Use the rest of the space
-
-# Uncomment to actually run the partitioning (DANGEROUS: erases all data on drive!)
 gdisk $DRIVE <<EOF
 o
+Y
 n
 1
 
@@ -142,3 +135,34 @@ n
 w
 Y
 EOF
+
+echo "Waiting for kernel to update partition table..."
+sleep 2
+partprobe "$DRIVE"
+sleep 2
+
+# Get partition names (e.g. /dev/sda1, /dev/sda2, ...)
+PART1="${DRIVE}1"
+PART2="${DRIVE}2"
+PART3="${DRIVE}3"
+PART4="${DRIVE}4"
+
+echo "Formatting partitions..."
+mkfs.fat -F32 "$PART1"
+mkswap "$PART2"
+mkfs.ext4 "$PART3"
+mkfs.ext4 "$PART4"
+
+echo "Mounting partitions..."
+mount "$PART3" /mnt
+mkdir -p /mnt/boot
+mount "$PART1" /mnt/boot
+swapon "$PART2"
+mkdir -p /mnt/home
+mount "$PART4" /mnt/home
+
+echo "All partitions created, formatted, and mounted:"
+echo "  Boot:  $PART1 -> /mnt/boot"
+echo "  Swap:  $PART2 -> activated"
+echo "  Root:  $PART3 -> /mnt"
+echo "  Home:  $PART4 -> /mnt/home"
